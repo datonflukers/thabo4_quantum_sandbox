@@ -37,6 +37,14 @@ LOG = logging.getLogger("quantum_v3")
 
 
 # =============================================================================
+# ADX/DI REGIME GATE CONSTANTS
+# =============================================================================
+ADX_BLOCK_THRESHOLD = 18.0   # Below this = chop, BLOCK all trades
+ADX_TREND_THRESHOLD = 20.0   # Full confidence trending market
+ADX_RISING_LOOKBACK = 5      # Bars to check if ADX is rising
+
+
+# =============================================================================
 # LEG 4: 15-MINUTE QUANTUM STRATEGY (RSI + Ichimoku + MA) - Using finta
 # =============================================================================
 
@@ -251,14 +259,18 @@ class Quantum15MStrategy:
     @staticmethod
     def check_entry_signal(df_15m: pd.DataFrame, htf_bullish: bool) -> Tuple[bool, str, Dict]:
         """
-        Check if all 15M entry conditions are met.
+        Check if all 15M entry conditions are met with ADX/DI REGIME GATE.
 
         REQUIRES:
         1. HTF (Daily) is BULLISH
         2. RSI >= 48
         3. Price above Ichimoku Cloud
         4. Price above EMA 50
-        5. ADX >= 20 (trending market)
+        5. ADX REGIME GATE:
+           - ADX < 18 = CHOP (block)
+           - ADX 18-20 = Only if rising AND +DI > -DI
+           - ADX >= 20 = Full confidence
+        6. +DI > -DI (buyers stronger than sellers)
 
         Returns: (should_enter, reason, details)
         """
@@ -284,21 +296,60 @@ class Quantum15MStrategy:
         if not ema_ok:
             return False, f"below_ema50_15m", {"price": price, "ema50": ema_value}
 
-        # Check 4: ADX >= 20 (trending)
-        adx_ok, adx_value = Quantum15MStrategy.check_adx(df_15m, threshold=20)
-        if not adx_ok:
-            return False, f"adx_low_15m_{adx_value:.1f}", {"adx": adx_value}
+        # =====================================================================
+        # ADX/DI REGIME GATE - ChatGPT recommended upgrade
+        # =====================================================================
+        high = df_15m['high'].astype(float)
+        low = df_15m['low'].astype(float)
+        close = df_15m['close'].astype(float)
+
+        plus_dm = high.diff()
+        minus_dm = -low.diff()
+        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
+        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+
+        tr = pd.concat([
+            high - low,
+            (high - close.shift(1)).abs(),
+            (low - close.shift(1)).abs()
+        ], axis=1).max(axis=1)
+
+        atr_14 = tr.rolling(14).mean()
+        plus_di = 100 * (plus_dm.rolling(14).mean() / (atr_14 + 1e-10))
+        minus_di = 100 * (minus_dm.rolling(14).mean() / (atr_14 + 1e-10))
+        dx = 100 * ((plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10))
+        adx_series = dx.rolling(14).mean()
+
+        current_adx = float(adx_series.iloc[-1])
+        past_adx = float(adx_series.iloc[-6]) if len(adx_series) >= 6 else current_adx
+        current_pdi = float(plus_di.iloc[-1])
+        current_mdi = float(minus_di.iloc[-1])
+
+        # REGIME GATE LOGIC
+        if current_adx < ADX_BLOCK_THRESHOLD:
+            return False, f"adx_chop_{current_adx:.1f}", {"adx": current_adx}
+
+        if current_adx < ADX_TREND_THRESHOLD:
+            # ADX 18-20 zone: only allow if rising AND +DI > -DI
+            if not (current_adx > past_adx and current_pdi > current_mdi):
+                return False, f"adx_not_rising_{current_adx:.1f}", {"adx": current_adx}
+
+        # Always require +DI > -DI (buyers stronger)
+        if current_pdi <= current_mdi:
+            return False, f"di_bearish_+{current_pdi:.0f}/-{current_mdi:.0f}", {"adx": current_adx}
 
         # All conditions met!
         details = {
             "rsi": rsi_value,
             "ichimoku": ichimoku,
             "ema50": ema_value,
-            "adx": adx_value,
+            "adx": current_adx,
+            "plus_di": current_pdi,
+            "minus_di": current_mdi,
             "price": price,
         }
 
-        return True, f"leg4_15m_rsi={rsi_value:.0f}_adx={adx_value:.0f}_cloud_ok", details
+        return True, f"leg4_15m_rsi={rsi_value:.0f}_adx={current_adx:.0f}_di+{current_pdi:.0f}", details
 
     @staticmethod
     def check_exit_signal(df_15m: pd.DataFrame, htf_bullish: bool) -> Tuple[bool, str]:
@@ -1828,9 +1879,8 @@ class QuantumExecutorV3:
         high = df['high'].astype(float)
         low = df['low'].astype(float)
 
-        # RELAXED thresholds in strong trends
+        # RSI threshold: 40 in strong trends, 45 otherwise
         rsi_threshold = 40 if is_strong else 45
-        adx_threshold = 12 if is_strong else 15
 
         # RSI check
         delta = close.diff()
@@ -1863,16 +1913,28 @@ class QuantumExecutorV3:
         current_plus_di = float(plus_di.iloc[-1])
         current_minus_di = float(minus_di.iloc[-1])
 
-        # ADX check
-        if adx < adx_threshold:
-            return False, f"adx_low_{adx:.1f}", False
+        # Get ADX from 5 bars ago for "rising" check
+        adx_series = dx.rolling(14).mean()
+        past_adx = float(adx_series.iloc[-6]) if len(adx_series) >= 6 else adx
 
-        # +DI > -DI
+        # =====================================================================
+        # ADX/DI REGIME GATE - ChatGPT recommended upgrade
+        # =====================================================================
+        # ADX < 18 = CHOP (block all trades)
+        if adx < ADX_BLOCK_THRESHOLD:
+            return False, f"adx_chop_{adx:.1f}", False
+
+        # ADX 18-20 = Only allow if rising AND +DI > -DI
+        if adx < ADX_TREND_THRESHOLD:
+            if not (adx > past_adx and current_plus_di > current_minus_di):
+                return False, f"adx_not_rising_{adx:.1f}", False
+
+        # Always require +DI > -DI (buyers stronger than sellers)
         if current_plus_di <= current_minus_di:
             return False, f"di_bearish_+{current_plus_di:.0f}/-{current_minus_di:.0f}", False
 
         trend_mode = "STRONG" if is_strong else "normal"
-        return True, f"quantum_{trend_mode}_rsi={current_rsi:.0f}_adx={adx:.0f}", is_strong
+        return True, f"quantum_{trend_mode}_rsi={current_rsi:.0f}_adx={adx:.0f}_di+{current_plus_di:.0f}", is_strong
 
     def _check_risky_entry_conditions(self, instrument: str, df: pd.DataFrame) -> Tuple[bool, str]:
         """
