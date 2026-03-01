@@ -37,10 +37,47 @@ LOG = logging.getLogger("quantum_v3")
 
 
 # =============================================================================
-# ADX/DI REGIME GATE CONSTANTS
+# TURBO MODE CONFIGURATION
 # =============================================================================
-ADX_BLOCK_THRESHOLD = 18.0   # Below this = chop, BLOCK all trades
-ADX_TREND_THRESHOLD = 20.0   # Full confidence trending market
+# Set TURBO_MODE = True for more aggressive trading (more trades, higher risk)
+# Set TURBO_MODE = False for conservative trading (fewer trades, lower risk)
+
+TURBO_MODE = False  # Toggle this to enable/disable turbo mode
+
+# Standard Mode Settings
+STANDARD_CONFIG = {
+    "ADX_BLOCK": 18.0,           # Block below this
+    "ADX_TREND": 20.0,           # Full confidence above this
+    "RSI_THRESHOLD": 48,          # RSI minimum for entry
+    "RSI_STRONG": 45,             # RSI in strong trends
+    "TRAILING_STOP_PCT": 10.0,    # Trailing stop percentage
+    "QUANTUM_STRENGTH_STRONG": 60, # Score to trigger "strong trend"
+    "MAX_POSITIONS": 9,
+    "MAX_2X_POSITIONS": 2,
+    "EXPOSURE_DIVISOR": 1.3,
+}
+
+# Turbo Mode Settings (more aggressive)
+TURBO_CONFIG = {
+    "ADX_BLOCK": 15.0,           # Lower threshold - accept more setups
+    "ADX_TREND": 18.0,           # Confidence at lower ADX
+    "RSI_THRESHOLD": 45,          # Lower RSI minimum
+    "RSI_STRONG": 40,             # Even lower in strong trends
+    "TRAILING_STOP_PCT": 7.0,     # Tighter trailing stop
+    "QUANTUM_STRENGTH_STRONG": 50, # Easier to trigger "strong trend"
+    "MAX_POSITIONS": 12,          # More concurrent positions
+    "MAX_2X_POSITIONS": 4,        # More 2x leverage positions
+    "EXPOSURE_DIVISOR": 1.0,      # Larger position sizes
+}
+
+# Active configuration based on mode
+ACTIVE_CONFIG = TURBO_CONFIG if TURBO_MODE else STANDARD_CONFIG
+
+# =============================================================================
+# ADX/DI REGIME GATE CONSTANTS (from active config)
+# =============================================================================
+ADX_BLOCK_THRESHOLD = ACTIVE_CONFIG["ADX_BLOCK"]
+ADX_TREND_THRESHOLD = ACTIVE_CONFIG["ADX_TREND"]
 ADX_RISING_LOOKBACK = 5      # Bars to check if ADX is rising
 
 
@@ -263,13 +300,13 @@ class Quantum15MStrategy:
 
         REQUIRES:
         1. HTF (Daily) is BULLISH
-        2. RSI >= 48
+        2. RSI >= threshold (from ACTIVE_CONFIG)
         3. Price above Ichimoku Cloud
         4. Price above EMA 50
         5. ADX REGIME GATE:
-           - ADX < 18 = CHOP (block)
-           - ADX 18-20 = Only if rising AND +DI > -DI
-           - ADX >= 20 = Full confidence
+           - ADX < BLOCK = CHOP (block)
+           - ADX BLOCK-TREND = Only if rising AND +DI > -DI
+           - ADX >= TREND = Full confidence
         6. +DI > -DI (buyers stronger than sellers)
 
         Returns: (should_enter, reason, details)
@@ -281,8 +318,9 @@ class Quantum15MStrategy:
         if len(df_15m) < 55:
             return False, "insufficient_15m_data", {}
 
-        # Check 1: RSI >= 48
-        rsi_ok, rsi_value = Quantum15MStrategy.check_rsi(df_15m, threshold=48)
+        # Check 1: RSI >= threshold (uses ACTIVE_CONFIG)
+        rsi_threshold = ACTIVE_CONFIG["RSI_THRESHOLD"]
+        rsi_ok, rsi_value = Quantum15MStrategy.check_rsi(df_15m, threshold=rsi_threshold)
         if not rsi_ok:
             return False, f"rsi_low_15m_{rsi_value:.1f}", {"rsi": rsi_value}
 
@@ -524,6 +562,9 @@ class TripleQuantumEMA:
             q3_spread = ((q3_ema9 - q3_ema21) / q3_ema21) * 100
             strength += min(25, max(0, q3_spread * 12.5))
 
+        # Use ACTIVE_CONFIG for strong trend threshold
+        strong_threshold = ACTIVE_CONFIG["QUANTUM_STRENGTH_STRONG"]
+
         return {
             "all_bullish": all_bullish,
             "q1_bullish": q1_bull,
@@ -534,7 +575,7 @@ class TripleQuantumEMA:
             "q2_emas": (q2_ema21, q2_ema55),
             "q3_emas": (q3_ema9, q3_ema21),
             "trend_strength": min(100, strength),
-            "is_strong_trend": strength >= 60,
+            "is_strong_trend": strength >= strong_threshold,
         }
 
     @staticmethod
@@ -1487,7 +1528,7 @@ class QuantumExecutorV3:
     STRONG_INSTRUMENTS = {"BTC/USD", "ETH/USD", "POL/USD", "ADA/USD", "SOL/USD", "LINK/USD", "XRP/USD"}
 
     # Maximum number of 2x positions allowed at any time
-    MAX_2X_POSITIONS = 2
+    MAX_2X_POSITIONS = ACTIVE_CONFIG["MAX_2X_POSITIONS"]
 
     # Per-instrument base leverage (before cap check)
     INSTRUMENT_LEVERAGE = {
@@ -1511,17 +1552,23 @@ class QuantumExecutorV3:
         initial_balance: float = 10000.0,
         trailing_trigger_pct: float = 2.0,  # Activate trailing at 2% profit
         trailing_pct: float = 1.75,  # Trail 1.75% below peak
-        max_positions: int = 9,
-        exposure_divisor: float = 1.3,  # 77% exposure
+        max_positions: int = None,  # Use ACTIVE_CONFIG if None
+        exposure_divisor: float = None,  # Use ACTIVE_CONFIG if None
         leverage: float = 2.0,  # 2x leverage
     ):
         self.initial_balance = initial_balance
         self.balance = initial_balance
         self.trailing_trigger_pct = trailing_trigger_pct
         self.trailing_pct = trailing_pct
-        self.max_positions = max_positions
-        self.exposure_divisor = exposure_divisor
+
+        # Use ACTIVE_CONFIG for turbo mode settings
+        self.max_positions = max_positions or ACTIVE_CONFIG["MAX_POSITIONS"]
+        self.exposure_divisor = exposure_divisor or ACTIVE_CONFIG["EXPOSURE_DIVISOR"]
         self.leverage = leverage
+
+        # Log mode
+        mode_name = "TURBO" if TURBO_MODE else "STANDARD"
+        LOG.info(f"[{mode_name} MODE] max_pos={self.max_positions}, divisor={self.exposure_divisor}, ADX_block={ADX_BLOCK_THRESHOLD}")
 
         self.structure = StructureAnalyzer()
         self.goal_engine = GoalEngine(default_goal=5.0, buffer=0.0)  # Tiered goals
