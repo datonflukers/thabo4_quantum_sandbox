@@ -1,7 +1,7 @@
 # Collaboration Guide - Thabo Quantum System
 
 ## 📍 Location
-**Dropbox Path**: `C:\Users\daton\Dropbox\thabo4_quantum_sandbox`
+**GitHub Repository**: `https://github.com/datonflukers/thabo4_quantum_sandbox`
 
 ---
 
@@ -10,7 +10,7 @@
 | Agent | Role | Access |
 |-------|------|--------|
 | **GitHub Copilot** | Primary developer, code editing | Full read/write via VS Code |
-| **ChatGPT** | Strategy advisor, code review | Read via Dropbox sharing |
+| **ChatGPT** | Strategy advisor, code review | Read via GitHub (see [`chatgpt.md`](chatgpt.md)) |
 | **Thabo** | Project owner, decision maker | Full access |
 
 ---
@@ -96,10 +96,10 @@
 
 ## 🔄 Workflow
 
-1. **ChatGPT** reviews code and suggests improvements
+1. **ChatGPT** reads files via raw GitHub links in [`chatgpt.md`](chatgpt.md) and suggests improvements
 2. **Copilot** implements changes in VS Code
 3. **Thabo** tests and approves
-4. Changes sync automatically via Dropbox
+4. Changes are tracked via GitHub (commits / pull requests)
 
 ---
 
